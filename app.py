@@ -13,8 +13,9 @@ from barcode.writer import ImageWriter
 import os
 
 # -------------------- Database Setup --------------------
-DATABASE = "shop_management.db"
+DATABASE = "inventory.db"
 
+# -------------------- Database Setup --------------------
 def init_db():
     with sqlite3.connect(DATABASE) as conn:
         cursor = conn.cursor()
@@ -25,65 +26,78 @@ def init_db():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             username TEXT UNIQUE,
             password TEXT,
-            role TEXT CHECK(role IN ('admin', 'staff'))
+            role TEXT CHECK(role IN ('admin', 'staff')),
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )''')
         
-        # Products Table
+        # Products Table (Added user_id)
         cursor.execute('''
         CREATE TABLE IF NOT EXISTS products (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT UNIQUE,
+            user_id INTEGER,
+            name TEXT,
             category TEXT,
             quantity INTEGER CHECK(quantity >= 0),
             unit_price REAL CHECK(unit_price >= 0),
-            barcode TEXT UNIQUE,
+            barcode TEXT,
             alert_threshold INTEGER DEFAULT 5,
             created_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            last_restock TIMESTAMP
+            last_restock TIMESTAMP,
+            FOREIGN KEY (user_id) REFERENCES users(id),
+            UNIQUE(user_id, name)
         )''')
         
-        # Sales Table
+        # Sales Table (Added user_id)
         cursor.execute('''
         CREATE TABLE IF NOT EXISTS sales (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
             product_id INTEGER,
             quantity_sold INTEGER CHECK(quantity_sold > 0),
             total_price REAL CHECK(total_price >= 0),
             sale_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (product_id) REFERENCES products (id)
+            FOREIGN KEY (product_id) REFERENCES products (id),
+            FOREIGN KEY (user_id) REFERENCES users(id)
         )''')
         
-        # Debts Table
+        # Debts Table (Added user_id)
         cursor.execute('''
         CREATE TABLE IF NOT EXISTS debts (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
             customer_name TEXT,
             phone TEXT,
             initial_amount REAL CHECK(initial_amount >= 0),
             remaining_amount REAL CHECK(remaining_amount >= 0),
             created_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             due_date DATE,
-            status TEXT CHECK(status IN ('active', 'paid', 'overdue'))
+            status TEXT CHECK(status IN ('active', 'paid', 'overdue')),
+            FOREIGN KEY (user_id) REFERENCES users(id)
         )''')
         
-        # Debt Payments Table
+        # Debt Payments Table (Added user_id)
         cursor.execute('''
         CREATE TABLE IF NOT EXISTS debt_payments (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
             debt_id INTEGER,
             amount REAL CHECK(amount >= 0),
             payment_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (debt_id) REFERENCES debts (id)
+            FOREIGN KEY (debt_id) REFERENCES debts (id),
+            FOREIGN KEY (user_id) REFERENCES users(id)
         )''')
         
-        # Suppliers Table
+        # Suppliers Table (Added user_id)
         cursor.execute('''
         CREATE TABLE IF NOT EXISTS suppliers (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT UNIQUE,
+            user_id INTEGER,
+            name TEXT,
             contact TEXT,
             email TEXT,
-            address TEXT
+            address TEXT,
+            FOREIGN KEY (user_id) REFERENCES users(id),
+            UNIQUE(user_id, name)
         )''')
 
 # Initialize database
@@ -204,7 +218,7 @@ def manage_settings():
         st.download_button(
             label="Backup Database",
             data=open(DATABASE, "rb").read(),
-            file_name="shop_backup.db",
+            file_name="inventory_backup.db",
             mime="application/octet-stream"
         )
         
@@ -286,101 +300,139 @@ def show_dashboard():
 def manage_inventory():
     st.title("📦 Inventory Management")
     
-    # Bulk Operations
-    col1, col2 = st.columns(2)
-    with col1:
-        st.subheader("Bulk Import")
-        uploaded_file = st.file_uploader("Upload CSV", type="csv")
-        if uploaded_file:
-            df = pd.read_csv(uploaded_file)
-            try:
-                with sqlite3.connect(DATABASE) as conn:
-                    df.to_sql('products', conn, if_exists='append', index=False)
-                st.success(f"Imported {len(df)} products successfully!")
-            except Exception as e:
-                st.error(f"Error importing: {str(e)}")
-    
-    with col2:
-        st.subheader("Export Data")
-        if st.button("Export Inventory"):
-            df = get_products()
-            csv = df.to_csv(index=False)
-            st.download_button(
-                label="Download CSV",
-                data=csv,
-                file_name="inventory.csv",
-                mime="text/csv"
-            )
-    
-    # Product Management
-    st.subheader("Product List")
-    products = get_products()
-    
-    # Low stock alerts
-    low_stock = products[products['quantity'] <= products['alert_threshold']]
-    if not low_stock.empty:
-        st.warning(f"⚠️ {len(low_stock)} items below stock threshold!")
-        st.dataframe(low_stock[['name', 'quantity', 'alert_threshold']])
-    
-    # Interactive Grid
-    gb = GridOptionsBuilder.from_dataframe(products)
-    gb.configure_pagination(paginationPageSize=10)
-    gb.configure_side_bar()
-    gb.configure_selection('single')
-    gb.configure_column("quantity", headerName="Stock", editable=True)
-    grid_options = gb.build()
-    
-    grid_response = AgGrid(
-        products,
-        gridOptions=grid_options,
-        columns_auto_size_mode=ColumnsAutoSizeMode.FIT_CONTENTS,
-        theme="streamlit",
-        update_mode='MODEL_CHANGED'
-    )
-    
-    # Product Actions
-    selected = grid_response['selected_rows']
-    if selected:
-        product = selected[0]
-        with st.expander("Product Actions"):
-            col1, col2 = st.columns(2)
-            with col1:
-                # Update stock
-                new_quantity = st.number_input("Update Quantity", 
-                                             value=product['quantity'],
-                                             min_value=0)
-                if st.button("Update Stock"):
+    with st.expander("Bulk Operations", expanded=True):
+        col1, col2 = st.columns(2)
+        with col1:
+            st.subheader("CSV Import")
+            uploaded_file = st.file_uploader("Upload products CSV", type="csv")
+            if uploaded_file:
+                try:
+                    df = pd.read_csv(uploaded_file)
+                    df['user_id'] = get_current_user_id()
                     with sqlite3.connect(DATABASE) as conn:
-                        conn.execute("UPDATE products SET quantity = ? WHERE id = ?",
-                                   (new_quantity, product['id']))
-                        st.success("Stock updated!")
-            with col2:
-                # Generate barcode
-                if st.button("Generate Barcode"):
-                    barcode_path = generate_barcode(product['id'])
-                    st.image(barcode_path)
-                    os.remove(barcode_path)
+                        df.to_sql('products', conn, if_exists='append', index=False)
+                    st.success(f"Imported {len(df)} products successfully!")
+                except Exception as e:
+                    st.error(f"Import error: {str(e)}")
+        
+        with col2:
+            st.subheader("Export Data")
+            if st.button("Export Current Inventory"):
+                df = get_products()
+                csv = df.to_csv(index=False)
+                st.download_button(
+                    label="Download CSV",
+                    data=csv,
+                    file_name="inventory.csv",
+                    mime="text/csv"
+                )
+
+    st.markdown("---")
+    st.subheader("Product Management")
     
-    # Add New Product
-    with st.expander("Add New Product"):
-        with st.form("add_product_form"):
-            name = st.text_input("Product Name")
-            category = st.text_input("Category")
-            quantity = st.number_input("Initial Stock", min_value=0)
-            unit_price = st.number_input("Unit Price", min_value=0.0)
-            alert_threshold = st.number_input("Low Stock Alert", min_value=0)
+    with st.expander("Real-time Stock Alerts"):
+        products = get_products()
+        low_stock = products[products['quantity'] <= products['alert_threshold']]
+        if not low_stock.empty:
+            st.warning(f"🚨 {len(low_stock)} items need restocking!")
+            st.dataframe(low_stock[['name', 'quantity', 'alert_threshold']])
+        else:
+            st.success("All stock levels are satisfactory")
+
+    with st.expander("Product List & Actions"):
+        products = get_products()
+        if not products.empty:
+            gb = GridOptionsBuilder.from_dataframe(products)
+            gb.configure_pagination(paginationPageSize=10)
+            gb.configure_side_bar()
+            gb.configure_selection('single', use_checkbox=True)
+            gb.configure_column("quantity", editable=True, headerName="Current Stock")
+            grid_options = gb.build()
             
-            if st.form_submit_button("Add Product"):
+            grid_response = AgGrid(
+                products,
+                gridOptions=grid_options,
+                columns_auto_size_mode=ColumnsAutoSizeMode.FIT_CONTENTS,
+                theme="streamlit",
+                update_mode='MODEL_CHANGED'
+            )
+            
+            selected = grid_response['selected_rows']
+            if selected:
+                product = selected[0]
+                with st.container(border=True):
+                    st.subheader("Selected Product Actions")
+                    col1, col2, col3 = st.columns([2,2,1])
+                    with col1:
+                        with st.form("update_stock_form"):
+                            new_qty = st.number_input("Update Stock", 
+                                                    value=product['quantity'],
+                                                    min_value=0)
+                            if st.form_submit_button("Update Quantity"):
+                                with sqlite3.connect(DATABASE) as conn:
+                                    conn.execute("""
+                                        UPDATE products 
+                                        SET quantity = ?, last_restock = CURRENT_TIMESTAMP 
+                                        WHERE id = ? AND user_id = ?
+                                    """, (new_qty, product['id'], get_current_user_id()))
+                                    st.success("Stock updated!")
+                    with col2:
+                        if st.button("Generate Barcode"):
+                            barcode_path = generate_barcode(product['id'])
+                            st.image(barcode_path)
+                            os.remove(barcode_path)
+                    with col3:
+                        if st.button("🗑️ Delete Product", type="secondary"):
+                            with sqlite3.connect(DATABASE) as conn:
+                                conn.execute("DELETE FROM products WHERE id = ? AND user_id = ?",
+                                           (product['id'], get_current_user_id()))
+                            st.rerun()
+        else:
+            st.info("No products found in inventory")
+
+    with st.expander("Add New Product", expanded=False):
+        with st.form("add_product_form", clear_on_submit=True):
+            cols = st.columns([2,1,1,1])
+            with cols[0]:
+                name = st.text_input("Product Name", key="prod_name")
+                category = st.text_input("Category")
+            with cols[1]:
+                quantity = st.number_input("Initial Stock", min_value=0, step=10)
+            with cols[2]:
+                unit_price = st.number_input("Unit Price", min_value=0.0, step=0.5)
+            with cols[3]:
+                alert_threshold = st.number_input("Low Stock Alert", min_value=1, value=5)
+            
+            if st.form_submit_button("➕ Add Product"):
                 try:
                     with sqlite3.connect(DATABASE) as conn:
                         conn.execute('''
-                        INSERT INTO products 
-                        (name, category, quantity, unit_price, alert_threshold)
-                        VALUES (?, ?, ?, ?, ?)
-                        ''', (name, category, quantity, unit_price, alert_threshold))
+                            INSERT INTO products 
+                            (user_id, name, category, quantity, unit_price, alert_threshold)
+                            VALUES (?, ?, ?, ?, ?, ?)
+                        ''', (get_current_user_id(), name, category, quantity, unit_price, alert_threshold))
                     st.success("Product added successfully!")
                 except sqlite3.IntegrityError:
-                    st.error("Product name already exists!")
+                    st.error("Product name already exists for your account!")
+
+# -------------------- Helper Functions --------------------
+def get_current_user_id():
+    return st.session_state.user['id']
+
+def get_products():
+    user_id = get_current_user_id()
+    with sqlite3.connect(DATABASE) as conn:
+        return pd.read_sql("SELECT * FROM products WHERE user_id = ?", conn, params=(user_id,))
+
+def get_sales():
+    user_id = get_current_user_id()
+    with sqlite3.connect(DATABASE) as conn:
+        return pd.read_sql('''
+            SELECT sales.*, products.name 
+            FROM sales 
+            JOIN products ON sales.product_id = products.id
+            WHERE sales.user_id = ?
+        ''', conn, params=(user_id,))
 
 # -------------------- Supplier Management --------------------
 def manage_suppliers():
@@ -485,90 +537,84 @@ def manage_sales():
         st.warning("No products available for sale")
         return
     
-    # Select Products
-    selected_products = st.multiselect(
-        "Select products to sell",
-        options=products.to_dict('records'),
-        format_func=lambda x: f"{x['name']} (₹{x['unit_price']} | Stock: {x['quantity']})"
-    )
-    
-    # Create Sale Items
-    sale_items = []
-    for product in selected_products:
-        col1, col2 = st.columns(2)
-        with col1:
-            qty = st.number_input(
-                f"Quantity for {product['name']}",
-                min_value=1,
-                max_value=product['quantity'],
-                value=1,
-                key=f"qty_{product['id']}"
-            )
-        with col2:
-            price = st.number_input(
-                "Unit Price",
-                value=product['unit_price'],
-                min_value=0.0,
-                key=f"price_{product['id']}"
-            )
-        sale_items.append({
-            'product_id': product['id'],
-            'qty': qty,
-            'price': price,
-            'total': qty * price
-        })
-    
-    # Display Cart
-    if sale_items:
-        st.subheader("Sale Summary")
-        cart_df = pd.DataFrame(sale_items)
-        st.dataframe(cart_df[['product_id', 'qty', 'price', 'total']])
+    with st.container(border=True):
+        st.subheader("New Sale Transaction")
+        selected_products = st.multiselect(
+            "Select products to sell",
+            options=products.to_dict('records'),
+            format_func=lambda x: f"{x['name']} (₹{x['unit_price']} | Stock: {x['quantity']})",
+            key="sale_products"
+        )
         
-        total = cart_df['total'].sum()
-        st.metric("Total Amount", f"₹{total:,.2f}")
-        
-        if st.button("Process Sale"):
-            try:
-                with sqlite3.connect(DATABASE) as conn:
-                    cursor = conn.cursor()
-                    # Process each item
-                    for item in sale_items:
-                        # Update inventory
-                        cursor.execute('''
-                        UPDATE products 
-                        SET quantity = quantity - ?
-                        WHERE id = ?
-                        ''', (item['qty'], item['product_id']))
-                        
-                        # Record sale
-                        cursor.execute('''
-                        INSERT INTO sales (product_id, quantity_sold, total_price)
-                        VALUES (?, ?, ?)
-                        ''', (item['product_id'], item['qty'], item['total']))
-                    
-                    st.success("Sale processed successfully!")
-                    st.balloons()
-                    
-                    # Generate receipt
-                    receipt = f"""
-                    ╔══════════════════════════════╗
-                    ║        SALES RECEIPT         ║
-                    ╠══════════════════════════════╣
-                    {datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
-                    
-                    Items:
-                    {cart_df.to_string(index=False)}
-                    
-                    Total: ₹{total:,.2f}
-                    ╚══════════════════════════════╝
-                    """
-                    st.download_button(
-                        label="Download Receipt",
-                        data=receipt,
-                        file_name="receipt.txt"
+        sale_items = []
+        for idx, product in enumerate(selected_products):
+            with st.container(border=True):
+                cols = st.columns([1,2,1])
+                with cols[0]:
+                    st.markdown(f"**{product['name']}**")
+                with cols[1]:
+                    qty = st.slider(
+                        "Quantity",
+                        1, product['quantity'],
+                        key=f"qty_{product['id']}",
+                        help="Adjust quantity to sell"
                     )
-            except Exception as e:
-                st.error(f"Error processing sale: {str(e)}")
+                with cols[2]:
+                    price = st.number_input(
+                        "Price",
+                        value=product['unit_price'],
+                        min_value=0.0,
+                        key=f"price_{product['id']}",
+                        step=0.5
+                    )
+                sale_items.append({
+                    'product_id': product['id'],
+                    'qty': qty,
+                    'price': price,
+                    'total': qty * price
+                })
+
+        if sale_items:
+            st.divider()
+            total = sum(item['total'] for item in sale_items)
+            st.markdown(f"### Total Amount: ₹{total:,.2f}")
+            
+            cols = st.columns([3,1])
+            with cols[0]:
+                customer_name = st.text_input("Customer Name (Optional)")
+            with cols[1]:
+                if st.button("💳 Process Sale", type="primary", use_container_width=True):
+                    try:
+                        with sqlite3.connect(DATABASE) as conn:
+                            cursor = conn.cursor()
+                            for item in sale_items:
+                                # Update inventory
+                                cursor.execute('''
+                                    UPDATE products 
+                                    SET quantity = quantity - ?
+                                    WHERE id = ? AND user_id = ?
+                                ''', (item['qty'], item['product_id'], get_current_user_id()))
+                                # Record sale
+                                cursor.execute('''
+                                    INSERT INTO sales 
+                                    (user_id, product_id, quantity_sold, total_price)
+                                    VALUES (?, ?, ?, ?)
+                                ''', (get_current_user_id(), item['product_id'], item['qty'], item['total']))
+                        
+                        st.success("Sale processed successfully!")
+                        st.balloons()
+                        
+                        # Generate receipt
+                        receipt = generate_receipt(sale_items, total, customer_name)
+                        st.download_button(
+                            label="📄 Download Receipt",
+                            data=receipt,
+                            file_name=f"receipt_{datetime.datetime.now().strftime('%Y%m%d_%H%M')}.txt",
+                            mime="text/plain"
+                        )
+                    except Exception as e:
+                        st.error(f"Transaction failed: {str(e)}")
+
 
 # -------------------- Debt Management --------------------
 def manage_debts():
